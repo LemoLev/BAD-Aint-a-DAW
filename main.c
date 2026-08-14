@@ -85,20 +85,20 @@ float get_custom_sample(float c) {
 float render(float t, float semitone, int chan) {
     switch (chan) {
         case 0:
-            return get_custom_sample(t*powf(2.f, (semitone-60)/12));
+            return get_custom_sample(t*powf(2.f, (semitone-72)/12));
         case 1:
-            return sine(t, semitone)*0.08f;
+            return sine(t, semitone+12)*0.08f;
         case 2:
             return (
-                sine(t, semitone+12.f)*0.6f
-                +(square(t, semitone+0.07f)*0.75f
-                +square(t, semitone-0.07f)*0.75f
-                +square(t, semitone)
+                sine(t, semitone+24.f)*0.6f
+                +(square(t, semitone+12.07f)*0.75f
+                +square(t, semitone-11.97f)*0.75f
+                +square(t, semitone+12.f)
                 )*0.5f
-                +(sawtooth(t, semitone-11.95f)
-                +sawtooth(t, semitone-12.05f)
-                +sawtooth(t, semitone-11.9f)
-                +sawtooth(t, semitone-12.1f)
+                +(sawtooth(t, semitone+.05f)
+                +sawtooth(t, semitone-.05f)
+                +sawtooth(t, semitone+.1f)
+                +sawtooth(t, semitone-.1f)
                 )*0.76f
             )*0.08f;
         case 3:
@@ -156,7 +156,7 @@ Note pbnotes_tf[32*INST_CHANNELS] = {0};
 NoteRelease pbnotesR_tf[32*INST_CHANNELS] = {0};
 // Pattern pattern = {0};
 // NoteRec notes_pattern[128] = {0};
-NoteRec notes_pattern[RECORD_PRECISION*2*32] = {0};
+NoteRec notes_pattern[RECORD_PRECISION*2*32*INST_CHANNELS] = {0};
 int keyboard_notes[32] = {KEY_Z, KEY_S,    KEY_X, KEY_D,     KEY_C, KEY_V, KEY_G,    KEY_B, KEY_H,   KEY_N, KEY_J,     KEY_M, // 4
                           KEY_Q, KEY_TWO,  KEY_W, KEY_THREE, KEY_E, KEY_R, KEY_FIVE, KEY_T, KEY_SIX, KEY_Y, KEY_SEVEN, KEY_U, // 5
                           KEY_I, KEY_NINE, KEY_O, KEY_ZERO,  KEY_P, 91,    61,       93};                                     // 6
@@ -244,7 +244,7 @@ int main(void) {
                 memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
                 memset(pbnotesR_tf, 0, sizeof(pbnotesR_tf));
                 memset(notes_down, 0, sizeof(notes_down));
-                for (int i = 0; i < RECORD_PRECISION*2*32; i++) {
+                for (int i = 0; i < RECORD_PRECISION*2*32*INST_CHANNELS; i++) {
                     if (notes_pattern[i].chan == curchan) {
                         notes_pattern[i] = (NoteRec){0};
                     }
@@ -348,33 +348,35 @@ int main(void) {
                     if (IsKeyDown(keyboard_notes[i])) {
                         playNote(t, i, curchan);
                         if (record) {
-                            notes_pattern[cursor*32+i] = (NoteRec){curchan, true, true};
+                            notes_pattern[curchan*RECORD_PRECISION*2*32+cursor*32+i] = (NoteRec){curchan, true, true};
                         }
                     }
                     else
                         if (notes_tf[curchan*32+i].playing) {
                             stopNote(t, i, curchan);
                             if (record)
-                                notes_pattern[cursor*32+i] = (NoteRec){curchan, false, true};
+                                notes_pattern[curchan*RECORD_PRECISION*2*32+cursor*32+i] = (NoteRec){curchan, false, true};
                         }
                 }
             }
         }
         if (!record)
-            for (int i = 0; i < 32; i++) {
-                for (int c = prevcursor; c <= (cursor >= prevcursor ? cursor : prevcursor+cursor); c++) {
-                    NoteRec np = notes_pattern[(c%(RECORD_PRECISION*2))*32+i];
-                    if (np.active) {
-                        notes_down[np.chan*32+i] = np.type;
-                    }
-                    if (!pbnotes_tf[np.chan*32+i].playing || !notes_down[np.chan*32+i]) {
-                        if (notes_down[np.chan*32+i]) {
-                            playRecordedNote(t, i, np.chan);
+            for (int ch = 0; ch < 4; ch++) {
+                for (int i = 0; i < 32; i++) {
+                    for (int c = prevcursor; c <= (cursor >= prevcursor ? cursor : prevcursor+cursor); c++) {
+                        NoteRec np = notes_pattern[ch*RECORD_PRECISION*2*32+(c%(RECORD_PRECISION*2))*32+i];
+                        if (np.active) {
+                            notes_down[np.chan*32+i] = np.type;
                         }
-                        else
-                            if (pbnotes_tf[np.chan*32+i].playing) {
-                                stopRecordedNote(t, i, np.chan);
+                        if (!pbnotes_tf[np.chan*32+i].playing || !notes_down[np.chan*32+i]) {
+                            if (notes_down[np.chan*32+i]) {
+                                playRecordedNote(t, i, np.chan);
                             }
+                            else
+                                if (pbnotes_tf[np.chan*32+i].playing) {
+                                    stopRecordedNote(t, i, np.chan);
+                                }
+                        }
                     }
                 }
             }
@@ -415,26 +417,28 @@ int main(void) {
         DrawRectangle(750,  0, 5, 800, (Color){10, 10, 10, 255});
         DrawRectangle(900,  0, 5, 800, (Color){10, 10, 10, 255});
         DrawRectangle(1050, 0, 5, 800, (Color){10, 10, 10, 255});
-        for (int c = 0; c < RECORD_PRECISION*2; c++) {
-            for (int i = 0; i < 32; i++) {
-                if (notes_pattern[c*32+i].active)
-                    switch (notes_pattern[c*32+i].chan) {
-                        case 0:
-                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[c*32+i].type ? (Color){255, 255, 0, 128} : (Color){128, 128, 0, 128});
-                            break;
-                        case 1:
-                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[c*32+i].type ? (Color){0, 0, 255, 128} : (Color){0, 0, 128, 128});
-                            break;
-                        case 2:
-                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[c*32+i].type ? (Color){0, 255, 0, 128} : (Color){0, 128, 0, 128});
-                            break;
-                        case 3:
-                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[c*32+i].type ? (Color){255, 128, 0, 128} : (Color){128, 64, 0, 128});
-                            break;
-                        default:
-                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[c*32+i].type ? (Color){128, 128, 128, 128} : (Color){64, 64, 64, 128});
-                            break;
-                    }
+        for (int ch = 0; ch < 4; ch++) {
+            for (int c = 0; c < RECORD_PRECISION*2; c++) {
+                for (int i = 0; i < 32; i++) {
+                    if (notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].active)
+                        switch (notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].chan) {
+                            case 0:
+                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){255, 255, 0, 128} : (Color){128, 128, 0, 128});
+                                break;
+                            case 1:
+                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){0, 0, 255, 128} : (Color){0, 0, 128, 128});
+                                break;
+                            case 2:
+                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){0, 255, 0, 128} : (Color){0, 128, 0, 128});
+                                break;
+                            case 3:
+                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){255, 128, 0, 128} : (Color){128, 64, 0, 128});
+                                break;
+                            default:
+                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){128, 128, 128, 128} : (Color){64, 64, 64, 128});
+                                break;
+                        }
+                }
             }
         }
         for (int c = prevcursor; c <= (cursor >= prevcursor ? cursor : prevcursor+cursor); c++) {
