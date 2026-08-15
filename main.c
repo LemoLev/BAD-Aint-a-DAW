@@ -18,6 +18,15 @@ typedef struct {
 } Envelope;
 
 typedef struct {
+    Color noteMuteOn;
+    Color noteMuteOff;
+    Color noteOn;
+    Color noteOff;
+    Color playLive;
+    Color playBack;
+} ChannelPalette;
+
+typedef struct {
     int framestamp;
     int chan;
     float v;
@@ -47,6 +56,162 @@ float *metronome;
 int customLength = -1;
 int mtrLength = -1;
 int curchan = 0;
+bool *chmute;
+NoteRec *notes_pattern;
+ChannelPalette palette[INST_CHANNELS] = {
+    { {255, 255, 0,   64}, {128, 128, 0,   64}, {255, 255, 0,   128}, {128, 128, 0,   128}, YELLOW, BLUE    },
+    { {0,   0,   255, 64}, {0,   0,   128, 64}, {0,   0,   255, 128}, {0,   0,   128, 128}, BLUE,   YELLOW  },
+    { {0,   255, 0,   64}, {0,   128, 0,   64}, {0,   255, 0,   128}, {0,   128, 0,   128}, GREEN,  MAGENTA },
+    { {255, 128, 0,   64}, {128, 64,  0,   64}, {255, 128, 0,   128}, {128, 64,  0,   128}, ORANGE, SKYBLUE }
+};
+
+typedef struct {
+    int count;
+    int capacity;
+    _Bool *items;
+} CHMUTE;
+
+typedef struct {
+    int count;
+    int capacity;
+    NoteRec *items;
+} NPTRN;
+
+#define da_push(xs, x) do {                                          \
+    if (xs.count >= xs.capacity) {                                   \
+        if (xs.capacity == 0) xs.capacity = 256;                     \
+        else xs.capacity *= 2;                                       \
+        xs.items = realloc(xs.items, xs.capacity*sizeof(*xs.items)); \
+    }                                                                \
+    xs.items[xs.count++] = x;                                        \
+} while (0)
+
+bool loading = false;
+int t = 0;
+int chamt;
+int plen;
+CHMUTE chmute_;
+NPTRN ntptrn;
+float transpos = 0;
+float bpm = 85.f;
+float stlen = 0;
+int cursor = 0;
+int prevcursor = 0;
+int measure = 0;
+bool record = false;
+bool pause = false;
+bool mtr_on = true;
+bool typing = false;
+bool notes_down[32*INST_CHANNELS] = {0};
+Envelope env = {0.001f, 0.001f, 1.f, .015f};
+Note notes_tf[32*INST_CHANNELS] = {0};
+NoteRelease notesR_tf[32*INST_CHANNELS] = {0};
+Note pbnotes_tf[32*INST_CHANNELS] = {0};
+NoteRelease pbnotesR_tf[32*INST_CHANNELS] = {0};
+
+void loadFile(char *filename) {
+    ntptrn.count = 0;
+    chmute_.count = 0;
+    measure = 0;
+    transpos = 0;
+    bpm = 0;
+    FILE *file = fopen(TextFormat("%s.bad", filename), "r");
+    if (file == NULL){
+        printf("[ERROR] Could not open %s.bad", filename);
+        return;
+    }
+    char line[256];
+    int ln = 0;
+    while (fgets(line, sizeof(line), file) != NULL) {
+        ln += 1;
+        int i = 1;
+        int cht = 0;
+        NoteRec nr = {0};
+        int nrp = 0;
+        while (line[i]) {
+            switch (line[0]) {
+                case '{':
+                    if (line[i] <= 57 && line[i] >= 48) {
+                        switch (nrp){
+                            case 0:
+                                cht *= 10;
+                                cht += line[i]-48;
+                                if (line[i+1] > 57 || line[i+1] < 48) {
+                                    nr.chan = cht;
+                                    nrp = 1;
+                                }
+                                break;
+                            case 1:
+                                nr.type = line[i]-48>0;
+                                nrp = 2;
+                                break;
+                            case 2:
+                                nr.active = line[i]-48>0;
+                                da_push(ntptrn, nr);
+                                nrp = 0;
+                                break;
+                        }
+                    }
+                    break;
+                case '[':
+                    if (line[i] <= 57 && line[i] >= 48) {
+                        da_push(chmute_, (line[i]-48>0));
+                    }
+                    break;
+                case 't':
+                    if (line[i] <= 57 && line[i] >= 48) {
+                        transpos *= 10;
+                        transpos += line[i]-48;
+                        if (line[i+1] > 57 || line[i+1] < 48) {
+                            transpos /= 10;
+                            if (line[1] == '-'){
+                                transpos *= -1;
+                            }
+                        }
+                    }
+                    break;
+                case 'b':
+                    if (line[i] <= 57 && line[i] >= 48) {
+                        bpm *= 10;
+                        bpm += line[i]-48;
+                    }
+                    break;
+                case 'c':
+                    if (line[i] <= 57 && line[i] >= 48) {
+                        chamt *= 10;
+                        chamt += line[i]-48;
+                    }
+                    break;
+                case 'p':
+                    if (line[i] <= 57 && line[i] >= 48) {
+                        plen *= 10;
+                        plen += line[i]-48;
+                    }
+                    break;
+            }
+            i += 1;
+        }
+    }
+    t = 0;
+    stlen = (240.f/bpm)*SAMPLE_RATE/RECORD_PRECISION;
+    memset(notes_tf, 0, sizeof(notes_tf));
+    memset(notesR_tf, 0, sizeof(notesR_tf));
+    memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
+    memset(pbnotesR_tf, 0, sizeof(pbnotesR_tf));
+    memset(notes_down, 0, sizeof(notes_down));
+    // free(chmute);
+    // free(notes_pattern);
+    memcpy(chmute, chmute_.items, sizeof(*chmute_.items)*chmute_.count);
+    memcpy(notes_pattern, ntptrn.items, sizeof(*ntptrn.items)*ntptrn.count);
+    free(chmute_.items);
+    free(ntptrn.items);
+    chmute_.items = NULL;
+    chmute_.count = 0;
+    chmute_.capacity = 0;
+    ntptrn.items = NULL;
+    ntptrn.count = 0;
+    ntptrn.capacity = 0;
+}
 
 float semitone_to_freq(float st){
     return (440.0f*powf(2.f, ((st-81.f)/12.f)));
@@ -57,8 +222,7 @@ float sine(int t, float semitone) {
 }
 
 float square(int t, float semitone) {
-    float s = sinf(2.0f * PI * semitone_to_freq(semitone)*t/SAMPLE_RATE);
-    return s >= 0 ? 1.f : -1.f;
+    return sine(t, semitone) >= 0 ? 1.f : -1.f;
 }
 
 float sawtooth(int t, float semitone) {
@@ -83,6 +247,7 @@ float get_custom_sample(float c) {
 }
 
 float render(float t, float semitone, int chan) {
+    if (chmute[chan]) return 0;
     switch (chan) {
         case 0:
             return get_custom_sample(t*powf(2.f, (semitone-72)/12));
@@ -100,9 +265,9 @@ float render(float t, float semitone, int chan) {
                 +sawtooth(t, semitone+.1f)
                 +sawtooth(t, semitone-.1f)
                 )*0.76f
-            )*0.08f;
+            )*0.04f;
         case 3:
-            return noise(t, semitone)*0.2f;
+            return noise(t, semitone)*0.08f;
         default:
             return 0;
     }
@@ -139,24 +304,10 @@ void reloadCustom(){
     UnloadWave(customw);
 }
 
-float transpos = 0;
-float bpm = 85.f;
-float stlen = 0;
-int cursor = 0;
-int prevcursor = 0;
-int measure = 0;
-bool record = false;
-bool pause = false;
-bool mtr_on = true;
-bool notes_down[32*INST_CHANNELS] = {0};
-Envelope env = {0.001f, 0.001f, 1.f, .015f};
-Note notes_tf[32*INST_CHANNELS] = {0};
-NoteRelease notesR_tf[32*INST_CHANNELS] = {0};
-Note pbnotes_tf[32*INST_CHANNELS] = {0};
-NoteRelease pbnotesR_tf[32*INST_CHANNELS] = {0};
-// Pattern pattern = {0};
-// NoteRec notes_pattern[128] = {0};
-NoteRec notes_pattern[RECORD_PRECISION*2*32*INST_CHANNELS] = {0};
+
+char projName[16];
+int namelen;
+
 int keyboard_notes[32] = {KEY_Z, KEY_S,    KEY_X, KEY_D,     KEY_C, KEY_V, KEY_G,    KEY_B, KEY_H,   KEY_N, KEY_J,     KEY_M, // 4
                           KEY_Q, KEY_TWO,  KEY_W, KEY_THREE, KEY_E, KEY_R, KEY_FIVE, KEY_T, KEY_SIX, KEY_Y, KEY_SEVEN, KEY_U, // 5
                           KEY_I, KEY_NINE, KEY_O, KEY_ZERO,  KEY_P, 91,    61,       93};                                     // 6
@@ -182,6 +333,8 @@ void playRecordedNote(int t, int key, int chan) {
 }
 
 int main(void) {
+    notes_pattern = (NoteRec*)malloc(sizeof(NoteRec)*RECORD_PRECISION*2*32*INST_CHANNELS);
+    chmute = (bool*)malloc(sizeof(bool)*INST_CHANNELS);
     stlen = (240.f/bpm)*SAMPLE_RATE/RECORD_PRECISION;
     InitWindow(1200, 800, "BAD Ain't a DAW");
     InitAudioDevice();
@@ -202,43 +355,41 @@ int main(void) {
     PlayAudioStream(stream);
 
     float buffer[BUFFER_SIZE*CHANNELS] = {0};
-    int t = 0;
 
     SetTargetFPS(60);
     while (!WindowShouldClose()) {
         cursor = (int)floorf(t/stlen)%(RECORD_PRECISION*2);
-        if(IsKeyPressed(KEY_TAB)) {
-            record = !record;
-            memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
-            memset(pbnotesR_tf, 0, sizeof(pbnotesR_tf));
-            memset(notes_down, 0, sizeof(notes_down));
-
-            if (!record) {
-                for (int i = 0; i < 32; i++){
-                    if (notes_tf[i].playing) {
-                        notes_pattern[cursor*32+i] = (NoteRec){notes_tf[i].chan, false, true};
-                    }
-                }
-            }
-        }
-
-        if(IsKeyPressed(KEY_SPACE)) {
-            pause = !pause;
-        }
-
-        if (IsKeyPressed(KEY_LEFT)) {
-            memset(notes_tf, 0, sizeof(notes_tf));
-            memset(notesR_tf, 0, sizeof(notesR_tf));
-            memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
-            memset(pbnotesR_tf, 0, sizeof(pbnotesR_tf));
-            memset(notes_down, 0, sizeof(notes_down));
-            t = 0;
-            measure = 0;
-        }
-
-        if(IsKeyDown(KEY_LEFT_CONTROL)){
+        if(IsKeyDown(KEY_LEFT_CONTROL)||IsKeyDown(KEY_RIGHT_CONTROL)){
             if(IsKeyPressed(KEY_R)) {
                 reloadCustom();
+            }
+            else if (IsKeyPressed(KEY_O)) {
+                if (projName[0])
+                    loadFile(projName);
+            }
+            else if (IsKeyPressed(KEY_S)) {
+                if (projName[0]) {
+                    FILE *projFile = fopen(TextFormat("%s.bad", projName), "w");
+
+                    if (projFile == NULL) {
+                        printf("[ERROR] Could not open %s.bad\n", projName);
+                    }
+                    else {
+                        fprintf(projFile, "b%d\n", (int)bpm);
+                        fprintf(projFile, "t%.0f%d\n", transpos, (int)(10*(transpos-floorf(transpos))));
+                        fprintf(projFile, "c%d\n", INST_CHANNELS);
+                        fprintf(projFile, "p%d\n", RECORD_PRECISION*2*32*INST_CHANNELS);
+                        fprintf(projFile, "[%b", chmute[0]);
+                        for (int i = 0; i < INST_CHANNELS-1; i++){
+                            fprintf(projFile, ",%b", chmute[i]);
+                        }
+                        fprintf(projFile, "]\n");
+                        for (int i = 0; i < RECORD_PRECISION*2*32*INST_CHANNELS; i++) {
+                            fprintf(projFile, "{%d,%b,%b}\n", notes_pattern[i].chan, notes_pattern[i].type, notes_pattern[i].active);
+                        }
+                        fclose(projFile);
+                    }
+                }
             }
             else if (IsKeyPressed(KEY_C)) {
                 memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
@@ -260,7 +411,6 @@ int main(void) {
                 memset(notes_down, 0, sizeof(notes_down));
                 t = 0;
                 measure = 0;
-                memset(buffer, 0, sizeof(buffer));
             }
             else if (IsKeyPressed(61)) {
                 bpm += 1.f;
@@ -272,7 +422,6 @@ int main(void) {
                 memset(notes_down, 0, sizeof(notes_down));
                 t = 0;
                 measure = 0;
-                memset(buffer, 0, sizeof(buffer));
             }
             else if (IsKeyPressed(KEY_M)) {
                 mtr_on = !mtr_on;
@@ -284,7 +433,7 @@ int main(void) {
                 transpos += 12.f;
             }
         }
-        else if (IsKeyDown(KEY_LEFT_SHIFT)){
+        else if (IsKeyDown(KEY_LEFT_SHIFT)||IsKeyDown(KEY_RIGHT_SHIFT)){
             if(IsKeyPressed(KEY_DOWN)){
                 transpos -= .1f;
             }
@@ -316,7 +465,42 @@ int main(void) {
                 // memset(buffer, 0, sizeof(buffer));
             }
         }
-        else {
+        else if (!typing) {
+            if(IsKeyPressed(KEY_TAB)) {
+                record = !record;
+                memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
+                memset(pbnotesR_tf, 0, sizeof(pbnotesR_tf));
+                memset(notes_down, 0, sizeof(notes_down));
+
+                if (!record) {
+                    for (int i = 0; i < 32; i++){
+                        if (notes_tf[curchan*32+i].playing) {
+                            notes_pattern[curchan*RECORD_PRECISION*2*32+cursor*32+i] = (NoteRec){notes_tf[curchan*32+i].chan, false, true};
+                        }
+                    }
+                }
+            }
+
+            if(IsKeyPressed(KEY_F)) {
+                chmute[curchan] = !chmute[curchan];
+            }
+            if(IsKeyPressed(KEY_SPACE)) {
+                pause = !pause;
+            }
+            if(IsKeyPressed(KEY_ENTER)) {
+                typing = true;
+            }
+
+            if (IsKeyPressed(KEY_LEFT)) {
+                memset(notes_tf, 0, sizeof(notes_tf));
+                memset(notesR_tf, 0, sizeof(notesR_tf));
+                memset(pbnotes_tf, 0, sizeof(pbnotes_tf));
+                memset(pbnotesR_tf, 0, sizeof(pbnotesR_tf));
+                memset(notes_down, 0, sizeof(notes_down));
+                t = 0;
+                measure = 0;
+            }
+
             if(IsKeyPressed(KEY_DOWN)){
                 transpos -= 1.f;
             }
@@ -359,6 +543,20 @@ int main(void) {
                         }
                 }
             }
+        }
+        else {
+            int typed = GetCharPressed();
+            if (IsKeyPressed(KEY_BACKSPACE)) {
+                if (namelen > 0)
+                    projName[--namelen] = 0;
+            }
+            else if (IsKeyPressed(KEY_ENTER)) {
+                typing = false;
+            }
+            else if (typed > 0)
+                if (namelen < 15)
+                    projName[namelen++] = typed;
+
         }
         if (!record)
             for (int ch = 0; ch < 4; ch++) {
@@ -406,7 +604,6 @@ int main(void) {
             }
             UpdateAudioStream(stream, buffer, BUFFER_SIZE);
         }
-
         BeginDrawing();
         ClearBackground(BLACK);
         DrawRectangle(0,    0, 5, 800, (Color){20, 20, 20, 255});
@@ -420,24 +617,13 @@ int main(void) {
         for (int ch = 0; ch < 4; ch++) {
             for (int c = 0; c < RECORD_PRECISION*2; c++) {
                 for (int i = 0; i < 32; i++) {
-                    if (notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].active)
-                        switch (notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].chan) {
-                            case 0:
-                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){255, 255, 0, 128} : (Color){128, 128, 0, 128});
-                                break;
-                            case 1:
-                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){0, 0, 255, 128} : (Color){0, 0, 128, 128});
-                                break;
-                            case 2:
-                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){0, 255, 0, 128} : (Color){0, 128, 0, 128});
-                                break;
-                            case 3:
-                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){255, 128, 0, 128} : (Color){128, 64, 0, 128});
-                                break;
-                            default:
-                                DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i].type ? (Color){128, 128, 128, 128} : (Color){64, 64, 64, 128});
-                                break;
-                        }
+                    NoteRec n = notes_pattern[ch*RECORD_PRECISION*2*32+c*32+i];
+                    if (n.active) {
+                        if (chmute[n.chan])
+                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, n.type ? palette[n.chan].noteMuteOn : palette[n.chan].noteMuteOff);
+                        else
+                            DrawRectangle((1200.f/RECORD_PRECISION/2)*c, 21*(32-i), 1200.f/RECORD_PRECISION/2, 21, n.type ? palette[n.chan].noteOn : palette[n.chan].noteOff);
+                    }
                 }
             }
         }
@@ -445,101 +631,79 @@ int main(void) {
             DrawRectangle((1200.f/RECORD_PRECISION/2)*(c%(RECORD_PRECISION*2)), 0, 1200.f/RECORD_PRECISION/2, 800, (int)((1200.f/RECORD_PRECISION/2)*(c%(RECORD_PRECISION*2)))%150 == 0 ? DARKGRAY : (Color){19, 19, 19, 128});
         }
         for (int j = 0; j < 32; j++){
+            int x = -100;
             switch (j % 12) {
                 case 0:
-                    DrawRectangle(((j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle(((j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle(((j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle(((j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 0;
                     break;
                 case 2:
-                    DrawRectangle((1+(j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle((1+(j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle((1+(j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle((1+(j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 1;
                     break;
                 case 4:
-                    DrawRectangle((2+(j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle((2+(j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle((2+(j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle((2+(j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 2;
                     break;
                 case 5:
-                    DrawRectangle((3+(j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle((3+(j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle((3+(j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle((3+(j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 3;
                     break;
                 case 7:
-                    DrawRectangle((4+(j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle((4+(j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle((4+(j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle((4+(j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 4;
                     break;
                 case 9:
-                    DrawRectangle((5+(j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle((5+(j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle((5+(j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle((5+(j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 5;
                     break;
                 case 11:
-                    DrawRectangle((6+(j-j%12)/12*7)*63, 700, 62, 25, notes_tf[j].playing    ? YELLOW   : (pbnotes_tf[j].playing    ? BLUE    : WHITE));
-                    DrawRectangle((6+(j-j%12)/12*7)*63, 725, 62, 25, notes_tf[32+j].playing ? BLUE     : (pbnotes_tf[32+j].playing ? YELLOW  : WHITE));
-                    DrawRectangle((6+(j-j%12)/12*7)*63, 750, 62, 25, notes_tf[64+j].playing ? GREEN    : (pbnotes_tf[64+j].playing ? MAGENTA : WHITE));
-                    DrawRectangle((6+(j-j%12)/12*7)*63, 775, 62, 25, notes_tf[96+j].playing ? ORANGE   : (pbnotes_tf[96+j].playing ? LIME    : WHITE));
+                    x = 6;
                     break;
+            }
+            for (int c = 0; c < 4; c++){
+                DrawRectangle((x+(j-j%12)/12*7)*63, 700+25*c, 62, 25, notes_tf[c*32+j].playing ? palette[c].playLive : (!chmute[c] && pbnotes_tf[c*32+j].playing ? palette[c].playBack : WHITE));
             }
         }
         for (int j = 0; j < 32; j++){
+            int x = -100;
             switch (j % 12) {
                 case 1:
-                    DrawRectangle(((j-j%12)/12*7)*63+44, 700, 39, 15, notes_tf[j].playing       ? YELLOW   : (pbnotes_tf[j].playing       ? BLUE       : DARKGRAY));
-                    DrawRectangle(((j-j%12)/12*7)*63+44, 715, 39, 15, notes_tf[32+j].playing    ? BLUE     : (pbnotes_tf[32+j].playing    ? YELLOW     : DARKGRAY));
-                    DrawRectangle(((j-j%12)/12*7)*63+44, 730, 39, 15, notes_tf[64+j].playing    ? GREEN    : (pbnotes_tf[64+j].playing    ? MAGENTA    : DARKGRAY));
-                    DrawRectangle(((j-j%12)/12*7)*63+44, 745, 39, 15, notes_tf[96+j].playing    ? ORANGE   : (pbnotes_tf[96+j].playing    ? LIME       : DARKGRAY));
+                    x = 0;
                     break;
                 case 3:
-                    DrawRectangle((1+(j-j%12)/12*7)*63+44, 700, 39, 15, notes_tf[j].playing       ? YELLOW   : (pbnotes_tf[j].playing       ? BLUE       : DARKGRAY));
-                    DrawRectangle((1+(j-j%12)/12*7)*63+44, 715, 39, 15, notes_tf[32+j].playing    ? BLUE     : (pbnotes_tf[32+j].playing    ? YELLOW     : DARKGRAY));
-                    DrawRectangle((1+(j-j%12)/12*7)*63+44, 730, 39, 15, notes_tf[64+j].playing    ? GREEN    : (pbnotes_tf[64+j].playing    ? MAGENTA    : DARKGRAY));
-                    DrawRectangle((1+(j-j%12)/12*7)*63+44, 745, 39, 15, notes_tf[96+j].playing    ? ORANGE   : (pbnotes_tf[96+j].playing    ? LIME       : DARKGRAY));
+                    x = 1;
                     break;
                 case 6:
-                    DrawRectangle((3+(j-j%12)/12*7)*63+44, 700, 39, 15, notes_tf[j].playing       ? YELLOW   : (pbnotes_tf[j].playing       ? BLUE       : DARKGRAY));
-                    DrawRectangle((3+(j-j%12)/12*7)*63+44, 715, 39, 15, notes_tf[32+j].playing    ? BLUE     : (pbnotes_tf[32+j].playing    ? YELLOW     : DARKGRAY));
-                    DrawRectangle((3+(j-j%12)/12*7)*63+44, 730, 39, 15, notes_tf[64+j].playing    ? GREEN    : (pbnotes_tf[64+j].playing    ? MAGENTA    : DARKGRAY));
-                    DrawRectangle((3+(j-j%12)/12*7)*63+44, 745, 39, 15, notes_tf[96+j].playing    ? ORANGE   : (pbnotes_tf[96+j].playing    ? LIME       : DARKGRAY));
+                    x = 3;
                     break;
                 case 8:
-                    DrawRectangle((4+(j-j%12)/12*7)*63+44, 700, 39, 15, notes_tf[j].playing       ? YELLOW   : (pbnotes_tf[j].playing       ? BLUE       : DARKGRAY));
-                    DrawRectangle((4+(j-j%12)/12*7)*63+44, 715, 39, 15, notes_tf[32+j].playing    ? BLUE     : (pbnotes_tf[32+j].playing    ? YELLOW     : DARKGRAY));
-                    DrawRectangle((4+(j-j%12)/12*7)*63+44, 730, 39, 15, notes_tf[64+j].playing    ? GREEN    : (pbnotes_tf[64+j].playing    ? MAGENTA    : DARKGRAY));
-                    DrawRectangle((4+(j-j%12)/12*7)*63+44, 745, 39, 15, notes_tf[96+j].playing    ? ORANGE   : (pbnotes_tf[96+j].playing    ? LIME       : DARKGRAY));
+                    x = 4;
                     break;
                 case 10:
-                    DrawRectangle((5+(j-j%12)/12*7)*63+44, 700, 39, 15, notes_tf[j].playing       ? YELLOW   : (pbnotes_tf[j].playing       ? BLUE       : DARKGRAY));
-                    DrawRectangle((5+(j-j%12)/12*7)*63+44, 715, 39, 15, notes_tf[32+j].playing    ? BLUE     : (pbnotes_tf[32+j].playing    ? YELLOW     : DARKGRAY));
-                    DrawRectangle((5+(j-j%12)/12*7)*63+44, 730, 39, 15, notes_tf[64+j].playing    ? GREEN    : (pbnotes_tf[64+j].playing    ? MAGENTA    : DARKGRAY));
-                    DrawRectangle((5+(j-j%12)/12*7)*63+44, 745, 39, 15, notes_tf[96+j].playing    ? ORANGE   : (pbnotes_tf[96+j].playing    ? LIME       : DARKGRAY));
+                    x = 5;
                     break;
+            }
+            for (int c = 0; c < 4; c++){
+                DrawRectangle((x+(j-j%12)/12*7)*63+44, 700+15*c, 39, 15, notes_tf[c*32+j].playing ? palette[c].playLive : (!chmute[c] && pbnotes_tf[c*32+j].playing ? palette[c].playBack : DARKGRAY));
             }
         }
         if(record)
             DrawCircle(50, 50, 20, RED);
+        const char *chmuttext = TextFormat("Channel %d muted", curchan);
         const char *chantext = TextFormat("Channel: %d", curchan);
         const char *bpmtext = TextFormat("BPM: %.0f", bpm);
         const char *tptext = TextFormat("Transposition: %.1f", transpos);
-        DrawText(tptext, 10, 40, 24, WHITE);
+        if (chmute[curchan])
+            DrawText(chmuttext, 10, 100, 24, WHITE);
         DrawText(chantext, 10, 70, 24, WHITE);
         DrawText(bpmtext, 10, 10, 24, WHITE);
+        DrawText(tptext, 10, 40, 24, WHITE);
         if (pause){
             DrawRectangle(0, 0, 1200, 800, (Color){128, 128, 128, 128});
             DrawText("Paused", 600-MeasureText("Paused", 96)/2, 320, 96, WHITE);
         }
+        DrawRectangle(1000, 0, 200, 50, (Color){32, 32, 32, typing ? 196 : 100});
+        DrawText(projName, 1010, 10, 24, typing ? WHITE : GRAY);
         EndDrawing();
         prevcursor = cursor;
     }
-
+    free(notes_pattern);
+    free(chmute);
     UnloadAudioStream(stream);
     UnloadWaveSamples(custom);
     UnloadWaveSamples(metronome);
